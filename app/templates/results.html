@@ -1,0 +1,55 @@
+﻿{% extends "base.html" %}
+
+{% block content %}
+<section class="results-header">
+  <div>
+    <h2>Reels dashboard</h2>
+    <div class="subtle">Job #{{ job.id }} - Status: {{ job.status }}</div>
+  </div>
+  <div class="actions">
+    <a class="ghost" href="{{ url_for('api.export', job_id=job.id, format='csv') }}">Export CSV</a>
+    <a class="ghost" href="{{ url_for('api.export', job_id=job.id, format='json') }}">Export JSON</a>
+  </div>
+</section>
+
+<div
+  id="progress"
+  hx-get="{{ url_for('api.job_status', job_id=job.id) }}"
+  hx-trigger="load, every {{ status_poll }}s"
+  hx-swap="outerHTML"
+></div>
+
+<section class="controls">
+  <input
+    id="search-input"
+    name="q"
+    type="text"
+    placeholder="Search titles, summaries, transcripts..."
+    hx-get="{{ url_for('api.job_reels', job_id=job.id) }}"
+    hx-target="#reel-list"
+    hx-trigger="keyup changed delay:500ms"
+    hx-include="#sort-select"
+  />
+  <select
+    id="sort-select"
+    name="sort"
+    hx-get="{{ url_for('api.job_reels', job_id=job.id) }}"
+    hx-target="#reel-list"
+    hx-trigger="change"
+    hx-include="#search-input"
+  >
+    <option value="date_desc">Newest</option>
+    <option value="date_asc">Oldest</option>
+    <option value="views_desc">Most views</option>
+    <option value="title_asc">Title A-Z</option>
+    <option value="title_desc">Title Z-A</option>
+  </select>
+</section>
+
+<div
+  id="reel-list"
+  hx-get="{{ url_for('api.job_reels', job_id=job.id) }}"
+  hx-trigger="load, every {{ list_poll }}s"
+  hx-swap="innerHTML"
+></div>
+{% endblock %}

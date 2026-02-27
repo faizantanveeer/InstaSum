@@ -1,0 +1,12 @@
+﻿__pycache__/
+*.pyc
+*.db
+*.sqlite
+*.sqlite3
+.env
+.tmp/
+tmp/
+instagram_cookies.txt
+ig_session
+ig_session*.*
+downloads/

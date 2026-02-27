@@ -1,0 +1,45 @@
+﻿{% extends "base.html" %}
+
+{% block content %}
+<section class="results-header">
+  <div>
+    <h2>Reels dashboard</h2>
+    <div class="subtle">@{{ username }}</div>
+  </div>
+  <div class="actions">
+    <a class="ghost" id="export-csv" href="{{ url_for('api.export_user', username=username, format='csv') }}">Export CSV</a>
+    <a class="ghost" id="export-json" href="{{ url_for('api.export_user', username=username, format='json') }}">Export JSON</a>
+  </div>
+</section>
+
+<div id="status" class="progress">
+  <div class="progress-top">
+    <div>
+      <div class="phase" id="status-text">Starting analysis...</div>
+      <div class="meta" id="status-meta">Preparing background worker</div>
+    </div>
+    <div class="status" id="status-pill">working</div>
+  </div>
+  <div class="bar">
+    <div class="bar-fill" id="status-bar" style="width: 10%"></div>
+  </div>
+</div>
+
+<div class="spinner" id="spinner"></div>
+
+<section class="controls">
+  <input id="search-input" type="text" placeholder="Search titles, summaries, transcripts..." />
+  <select id="sort-select">
+    <option value="date_desc">Newest</option>
+    <option value="date_asc">Oldest</option>
+    <option value="views_desc">Most views</option>
+    <option value="title_asc">Title A-Z</option>
+    <option value="title_desc">Title Z-A</option>
+  </select>
+</section>
+
+<div id="results" data-results-page="true" data-username="{{ username }}" data-refresh="{{ refresh }}">
+  <div id="reel-list" class="reel-list"></div>
+  <div id="empty-state" class="empty">No reels found yet.</div>
+</div>
+{% endblock %}

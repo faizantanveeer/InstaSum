@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="profile-header">
+  <div class="profile-card">
+    <div class="avatar" style="background-image: url('{{ profile.profile_pic_url }}');"></div>
+    <div class="profile-info">
+      <h2>{{ profile.full_name or profile.username }}</h2>
+      <div class="handle">@{{ profile.username }}</div>
+      <p class="bio">{{ profile.biography or 'No bio available.' }}</p>
+      <div class="stats">
+        <span>{{ profile.followers or 0 }} followers</span>
+        <span>{{ profile.following or 0 }} following</span>
+        <span>{{ profile.post_count or 0 }} posts</span>
+      </div>
+    </div>
+  </div>
+
+  {% if error_message %}
+    <div class="flash flash-error">{{ error_message }}</div>
+  {% endif %}
+
+  {% if cache_notice %}
+    <div class="flash flash-info">{{ cache_notice }}</div>
+  {% endif %}
+
+  {% if not can_start %}
+    <div class="flash flash-error">Processing is disabled until OPENAI_API_KEY is configured.</div>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('main.analyze') }}" class="start-form">
+    <input type="hidden" name="username" value="{{ profile.username }}" />
+    {% if force_refresh %}
+      <input type="hidden" name="force_refresh" value="on" />
+    {% endif %}
+    <button type="submit" class="primary" {% if not can_start or error_message %}disabled{% endif %}>
+      Start Analysis
+    </button>
+  </form>
+</section>
+
+<section class="preview-section">
+  <div class="preview-title">
+    <h3>Reel preview</h3>
+    <div class="subtle">Latest public reels for this profile.</div>
+  </div>
+  {% if reels %}
+    <div class="preview-grid">
+      {% for reel in reels %}
+        <div class="preview-card" style="background-image: url('{{ reel.thumbnail_url }}');">
+          <a class="thumb-link" href="{{ reel.reel_url }}" target="_blank" rel="noopener">Open</a>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty">No reels found yet.</div>
+  {% endif %}
+</section>
+{% endblock %}

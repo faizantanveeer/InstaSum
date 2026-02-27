@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero">
+  <div class="hero-text">
+    <h1>Search a public Instagram profile.</h1>
+    <p>Fetch profile and reel metadata first, then generate transcript and summary per reel or for all reels on demand.</p>
+  </div>
+  <div class="hero-card">
+    <form id="profile-search-form" method="post" action="{{ url_for('main.dashboard_search') }}" class="input-form">
+      <label for="profile_input">Instagram profile</label>
+      <input id="profile_input" name="profile_input" type="text" placeholder="instagram.com/username or username" value="{{ profile.username if profile else '' }}" required />
+      <button id="profile-search-button" type="submit" class="primary">Search</button>
+      <div id="search-loader" class="search-loader hidden" aria-live="polite">
+        <span class="inline-spinner" aria-hidden="true"></span>
+        <span>Fetching profile and reels...</span>
+      </div>
+      <div class="hint">Search only fetches metadata and thumbnails.</div>
+    </form>
+  </div>
+</section>
+
+{% if profile %}
+<section class="results-header">
+  <div>
+    <h2>Workspace for @{{ profile.username }}</h2>
+    <div class="subtle">{{ reels|length }} reels loaded</div>
+    <div class="subtle">
+      {{ profile.full_name or profile.username }}
+      {% if profile.followers is not none %}• {{ profile.followers }} followers{% endif %}
+      {% if profile.post_count is not none %}• {{ profile.post_count }} posts{% endif %}
+    </div>
+    {% if profile.biography %}
+      <div class="subtle">{{ profile.biography }}</div>
+    {% endif %}
+  </div>
+  <div class="actions">
+    <button class="ghost job-trigger" data-action="generate-all" data-profile-id="{{ profile.id }}">Generate All</button>
+    <button class="ghost job-trigger" data-action="regenerate-all" data-profile-id="{{ profile.id }}">Regenerate All</button>
+    <a class="ghost" href="{{ url_for('api.export_profile', profile_id=profile.id, format='csv') }}">Export CSV</a>
+    <a class="ghost" href="{{ url_for('api.export_profile', profile_id=profile.id, format='json') }}">Export JSON</a>
+  </div>
+</section>
+{% endif %}
+
+<div id="status" class="progress">
+  <div class="progress-top">
+    <div>
+      <div class="phase" id="status-text">Idle</div>
+      <div class="meta" id="status-meta">No active processing job.</div>
+    </div>
+    <div class="status" id="status-pill">ready</div>
+  </div>
+  <div class="bar">
+    <div class="bar-fill" id="status-bar" style="width: 0%"></div>
+  </div>
+</div>
+
+<section class="controls">
+  <input id="search-input" type="text" placeholder="Search titles, summaries, transcripts..." />
+  <select id="sort-select">
+    <option value="date_desc">Newest</option>
+    <option value="date_asc">Oldest</option>
+    <option value="views_desc">Most views</option>
+    <option value="title_asc">Title A-Z</option>
+    <option value="title_desc">Title Z-A</option>
+  </select>
+</section>
+
+<div id="results" data-dashboard-page="true" data-profile-id="{{ active_profile_id or '' }}">
+  <div id="reel-list" class="reel-list">
+    {% for reel in reels %}
+      {% include "partials/reel_card.html" %}
+    {% endfor %}
+  </div>
+  <div id="empty-state" class="empty" {% if reels %}style="display:none"{% endif %}>
+    {% if profile %}No reels loaded for this profile yet.{% else %}Search a profile to load reels.{% endif %}
+  </div>
+</div>
+{% endblock %}

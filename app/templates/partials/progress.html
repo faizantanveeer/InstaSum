@@ -1,0 +1,12 @@
+﻿<div class="progress" id="progress" data-done="{{ 'true' if done else 'false' }}">
+  <div class="progress-top">
+    <div>
+      <div class="phase">{{ job.message }}</div>
+      <div class="meta">{{ processed }} / {{ total }} processed - {{ job.success_count }} success - {{ job.failed_count }} failed - {{ job.skipped_count }} skipped</div>
+    </div>
+    <div class="status">{{ job.status }}</div>
+  </div>
+  <div class="bar">
+    <div class="bar-fill" style="width: {{ percent }}%"></div>
+  </div>
+</div>

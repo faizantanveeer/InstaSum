@@ -1,0 +1,48 @@
+﻿{% extends "base.html" %}
+
+{% block content %}
+<section class="hero">
+  <div class="hero-text">
+    <h1>Turn any public Instagram into a reel intelligence dashboard.</h1>
+    <p>Paste a profile link or username. We will discover reels, transcribe audio, and generate clean summaries you can scan, search, and export.</p>
+  </div>
+  <div class="hero-card">
+    <form method="post" action="{{ url_for('main.analyze') }}" class="input-form">
+      <label for="profile_input">Instagram profile</label>
+      <input id="profile_input" name="profile_input" type="text" placeholder="instagram.com/username or username" required />
+      <div class="options">
+        <label class="checkbox">
+          <input type="checkbox" name="force_refresh" />
+          <span>Force refresh (ignore cache)</span>
+        </label>
+      </div>
+      {% if config.HCAPTCHA_SITEKEY and config.CAPTCHA_ENABLED %}
+      <div class="h-captcha" data-sitekey="{{ config.HCAPTCHA_SITEKEY }}"></div>
+      {% endif %}
+      <button type="submit" class="primary">Analyze Reels</button>
+      <div class="hint">Processing takes a few minutes for large profiles.</div>
+    </form>
+  </div>
+</section>
+
+<section class="info">
+  <div class="info-card">
+    <h3>What you get</h3>
+    <ul>
+      <li>AI titles and 2-4 sentence summaries</li>
+      <li>Full transcripts for each reel</li>
+      <li>Engagement metrics and dates</li>
+      <li>CSV or JSON export</li>
+    </ul>
+  </div>
+  <div class="info-card">
+    <h3>How it works</h3>
+    <ul>
+      <li>We discover reels from the public profile</li>
+      <li>Audio is transcribed and summarized</li>
+      <li>Results are cached for 24 hours</li>
+    </ul>
+  </div>
+</section>
+{% endblock %}
+

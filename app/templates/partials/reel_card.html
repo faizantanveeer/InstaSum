@@ -1,0 +1,110 @@
+﻿{% set thumb_url = reel.thumbnail_url or (reel.thumbnail_path and ('/thumbnails/' ~ reel.username ~ '/' ~ reel.thumbnail_path)) %}
+{% set thumb_src = thumb_url %}
+{% if thumb_url and thumb_url.startswith('http') %}
+  {% set thumb_src = url_for('api.proxy_image', url=thumb_url) %}
+{% endif %}
+{% set audio_file = (reel.audio_path or ('audio/' ~ reel.shortcode ~ '.mp3')) | replace('\\', '/') %}
+{% set audio_url = url_for('api.audio', username=reel.username, filename=audio_file) %}
+{% set show_audio = reel.audio_path or (reel.processing_status == 'completed') or (reel.has_audio is defined and reel.has_audio) %}
+{% set status_value = reel.processing_status or 'pending' %}
+
+<div id="reel-card-{{ reel.id }}" class="reel-card"
+     data-title="{{ reel.ai_title or '' }}"
+     data-views="{{ reel.view_count or 0 }}"
+     data-date="{{ reel.posted_at or '' }}">
+  <div class="thumb">
+    {% if thumb_url %}
+    <a class="thumb-link-cover" href="{{ thumb_url }}" target="_blank" rel="noopener">
+      <img src="{{ thumb_src }}" alt="{{ reel.ai_title or 'Reel thumbnail' }}" loading="lazy" width="240" height="320" />
+    </a>
+    {% else %}
+    <div class="thumb-fallback">No thumbnail</div>
+    {% endif %}
+
+    {% if reel.reel_url %}
+    <a class="thumb-icon-btn" href="{{ reel.reel_url }}" target="_blank" rel="noopener" aria-label="Open reel">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M14 5h5v5M10 14l9-9M19 14v5H5V5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </a>
+    {% endif %}
+  </div>
+
+  <div class="reel-body">
+    <div class="reel-header">
+      <div class="reel-title">{{ reel.ai_title or 'Untitled Reel' }}</div>
+      <span class="status status-{{ status_value }}">
+        <span class="status-icon" aria-hidden="true">
+          {% if status_value == 'completed' %}
+          <svg viewBox="0 0 24 24" fill="none"><path d="M20 7L10 17l-6-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          {% elif status_value == 'failed' %}
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 8v5m0 3h.01M22 12A10 10 0 1 1 2 12a10 10 0 0 1 20 0Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          {% elif status_value == 'processing' %}
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 6v6l4 2M22 12A10 10 0 1 1 12 2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          {% elif status_value == 'skipped' %}
+          <svg viewBox="0 0 24 24" fill="none"><path d="M8 5l8 7-8 7V5Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          {% else %}
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 8v4l3 2M22 12A10 10 0 1 1 2 12a10 10 0 0 1 20 0Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          {% endif %}
+        </span>
+        <span class="status-label">{{ status_value }}</span>
+      </span>
+    </div>
+
+    <div class="reel-summary">{{ reel.ai_summary or 'Summary will appear when processing completes.' }}</div>
+
+    <div class="reel-actions">
+      <button type="button" class="ghost job-trigger icon-btn" data-action="generate-reel" data-reel-id="{{ reel.id }}">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 3l1.9 4.8L19 9.7l-4.2 3.1L16.3 18 12 14.9 7.7 18l1.5-5.2L5 9.7l5.1-1.9L12 3Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Generate</span>
+      </button>
+      <button type="button" class="ghost job-trigger icon-btn" data-action="regenerate-reel" data-reel-id="{{ reel.id }}">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M20 11a8 8 0 1 0 2 5.3M20 11V5m0 6h-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Regenerate</span>
+      </button>
+    </div>
+
+    <div class="reel-meta">
+      <span class="meta-item">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 2v3M16 2v3M3 9h18M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>{{ reel.posted_at if reel.posted_at else 'Date unknown' }}</span>
+      </span>
+      <span class="meta-item">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M1.5 12s4-7 10.5-7 10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7"/></svg>
+        <span>{{ reel.view_count or '-' }}</span>
+      </span>
+      <span class="meta-item">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20s-7-4.5-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 10c0 5.5-7 10-7 10Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>{{ reel.like_count or '-' }}</span>
+      </span>
+      <span class="meta-item">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>{{ reel.comment_count or '-' }}</span>
+      </span>
+    </div>
+
+    {% if reel.processing_status in ['failed', 'skipped'] %}
+      <div class="reel-error">{{ reel.error_reason or 'Processing failed.' }}</div>
+    {% endif %}
+
+    {% if show_audio %}
+    <div class="audio-wrap">
+      <audio controls preload="none" src="{{ audio_url }}"></audio>
+    </div>
+    {% endif %}
+
+    <button type="button" class="transcript-toggle collapse-toggle" data-transcript="transcript-{{ reel.id }}" data-read-label="Read Transcript" data-hide-label="Hide Transcript">Read Transcript</button>
+    <div id="transcript-{{ reel.id }}" class="reel-transcript hidden">
+      {{ reel.transcript or 'Transcript pending.' }}
+    </div>
+
+    <button type="button" class="transcript-toggle collapse-toggle" data-transcript="summary-{{ reel.id }}" data-read-label="Read Detailed Summary" data-hide-label="Hide Detailed Summary">Read Detailed Summary</button>
+    <div id="summary-{{ reel.id }}" class="reel-transcript hidden">
+      {{ reel.summary_detail or reel.ai_summary or 'Detailed summary pending.' }}
+    </div>
+  </div>
+</div>

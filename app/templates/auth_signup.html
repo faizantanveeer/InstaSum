@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="auth-wrap">
+  <div class="auth-card">
+    <h2>Create account</h2>
+    <p class="subtle">Your reel data is isolated to your account.</p>
+    <form method="post" action="{{ url_for('auth.signup_post') }}" class="input-form">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required />
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" required />
+      <label for="confirm_password">Confirm password</label>
+      <input id="confirm_password" name="confirm_password" type="password" required />
+      <button type="submit" class="primary">Sign up</button>
+    </form>
+    <p class="subtle">Already registered? <a href="{{ url_for('auth.login') }}">Login</a>.</p>
+  </div>
+</section>
+{% endblock %}
