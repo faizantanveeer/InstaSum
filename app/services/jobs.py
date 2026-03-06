@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import time
@@ -7,12 +7,13 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
-from ..db import get_session, upsert_reel_fts
+from ..db import get_session
 from ..models import Job, Profile, Reel, ReelError
 from .instagram import InstagramService, InstagramError
 from .transcription import TranscriptionService, TranscriptionError
 from .summarization import SummarizationService
-from .media import download_reel_audio, MediaError
+from .media import download_reel_media_tmp, MediaError
+from .storage import upload_audio, upload_thumbnail
 from .utils import ensure_dir
 
 _worker_thread = None
@@ -120,11 +121,18 @@ def _process_job(app, job_id: int):
             return
 
         ig = InstagramService(
-            rapidapi_key=app.config["RAPIDAPI_KEY"],
             apify_token=app.config["APIFY_TOKEN"],
+            ig_username=app.config["IG_USERNAME"],
+            ig_password=app.config["IG_PASSWORD"],
             cookies_file=app.config["IG_COOKIES_FILE"],
+            cookies_from_browser=app.config["IG_COOKIES_FROM_BROWSER"],
+            browser_name=app.config["IG_BROWSER"],
+            browser_profile=app.config["IG_BROWSER_PROFILE"],
             temp_dir=app.config["TEMP_DIR"],
             cache_minutes=app.config["PROFILE_CACHE_MINUTES"],
+            fetch_timeout_seconds=app.config["FETCH_TIMEOUT_SECONDS"],
+            fetch_delay_min=app.config["FETCH_DELAY_MIN"],
+            fetch_delay_max=app.config["FETCH_DELAY_MAX"],
         )
         tx = TranscriptionService(
             app.config["WHISPER_MODEL"],
@@ -141,16 +149,22 @@ def _process_job(app, job_id: int):
             },
         )
 
-        try:
-            reels, source, _profile = ig.fetch_reels(profile.username, limit=app.config["MAX_REELS"])
-        except InstagramError as exc:
+        fetch_result = ig.fetch_reels_result(profile.username, limit=app.config["MAX_REELS"])
+        if not fetch_result.get("success"):
+            reasons = "; ".join(
+                f"{err.get('layer')}: {err.get('reason')}" for err in (fetch_result.get("errors") or [])
+            )
             job.status = "failed"
             job.phase = "failed"
-            job.message = str(exc)
+            job.message = fetch_result.get("message") or "Instagram fetch failed."
+            if reasons:
+                job.message = f"{job.message} ({reasons})"
             job.finished_at = datetime.utcnow()
             profile.last_error = job.message
             session.commit()
             return
+        reels = fetch_result.get("reels") or []
+        source = fetch_result.get("source") or "unknown"
 
         job.total_count = len(reels)
         job.phase = "downloading_media"
@@ -198,22 +212,26 @@ def _process_job(app, job_id: int):
                 job.message = "Extracting audio and transcribing..."
                 session.commit()
 
-                media = download_reel_audio(
-                    reel.reel_url,
-                    reel.shortcode,
-                    profile.username,
-                    app.config["DOWNLOADS_DIR"],
-                    app.config["IG_COOKIES_FILE"],
-                    app.config["FFMPEG_LOCATION"],
-                )
-                reel.audio_path = media.get("audio_file")
-                reel.thumbnail_path = media.get("thumbnail_file")
+                with download_reel_media_tmp(
+                    reel_url=reel.reel_url,
+                    shortcode=reel.shortcode,
+                    cookies_file=app.config["IG_COOKIES_FILE"],
+                    cookies_from_browser=app.config["IG_COOKIES_FROM_BROWSER"],
+                    browser_name=app.config["IG_BROWSER"],
+                    browser_profile=app.config["IG_BROWSER_PROFILE"],
+                    ffmpeg_location=app.config["FFMPEG_LOCATION"],
+                ) as media:
+                    audio_tmp_path = media.get("audio_path")
+                    thumb_tmp_path = media.get("thumbnail_path")
+                    raw_transcript = tx.transcribe(audio_tmp_path or "")
+                    audio_upload = upload_audio(audio_tmp_path, reel.shortcode, profile.username)
+                    thumb_upload = upload_thumbnail(thumb_tmp_path, reel.shortcode, profile.username)
 
-                raw_transcript = tx.transcribe(
-                    os.path.join(app.config["DOWNLOADS_DIR"], profile.username, reel.audio_path)
-                    if reel.audio_path
-                    else ""
-                )
+                reel.audio_url = audio_upload.get("url")
+                reel.audio_cloudinary_id = audio_upload.get("public_id")
+                if thumb_upload.get("url"):
+                    reel.thumbnail_url = thumb_upload.get("url")
+                    reel.thumbnail_cloudinary_id = thumb_upload.get("public_id")
                 if raw_transcript.strip():
                     reel.transcript = raw_transcript
                     reel.transcript_status = "ok"
@@ -233,8 +251,6 @@ def _process_job(app, job_id: int):
                 reel.processed = True
                 job.success_count += 1
 
-                # Update search index
-                upsert_reel_fts(session, reel.id, reel.ai_title, reel.ai_summary, reel.transcript)
 
             except (TranscriptionError, InstagramError, MediaError) as exc:
                 session.rollback()

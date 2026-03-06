@@ -1,8 +1,20 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
+import uuid
 
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, Index
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Computed,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import relationship
 
 from .db import Base
@@ -11,7 +23,7 @@ from .db import Base
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True)
+    id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -48,10 +60,12 @@ class Job(Base):
 
     id = Column(Integer, primary_key=True)
     profile_id = Column(Integer, ForeignKey("profiles.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     job_type = Column(String(20), default="batch")
-    target_profile_id = Column(Integer, ForeignKey("profiles.id"), nullable=True)
-    target_reel_id = Column(Integer, ForeignKey("reels.id"), nullable=True)
+    # Optional references kept as plain IDs to avoid circular FK dependency
+    # with reels.job_id during schema drop/create operations.
+    target_profile_id = Column(Integer, nullable=True)
+    target_reel_id = Column(Integer, nullable=True)
 
     status = Column(String(50), default="queued")
     phase = Column(String(50), default="queued")
@@ -70,7 +84,6 @@ class Job(Base):
     cache_hit = Column(Boolean, default=False)
 
     profile = relationship("Profile", foreign_keys=[profile_id], back_populates="jobs")
-    target_profile = relationship("Profile", foreign_keys=[target_profile_id])
     user = relationship("User", back_populates="jobs")
     reels = relationship("Reel", back_populates="job", foreign_keys="Reel.job_id")
 
@@ -81,15 +94,19 @@ class Reel(Base):
     id = Column(Integer, primary_key=True)
     job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
     profile_id = Column(Integer, ForeignKey("profiles.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     username = Column(String(255), nullable=True, index=True)
 
     shortcode = Column(String(50), nullable=False)
     reel_url = Column(String(500), nullable=False)
-    thumbnail_url = Column(String(1000), nullable=True)
     video_url = Column(String(1000), nullable=True)
-    thumbnail_path = Column(String(500), nullable=True)
-    audio_path = Column(String(500), nullable=True)
+
+    # Cloudinary-managed media
+    thumbnail_url = Column(String(1000), nullable=True)
+    thumbnail_cloudinary_id = Column(String(255), nullable=True)
+    audio_url = Column(String(1000), nullable=True)
+    audio_cloudinary_id = Column(String(255), nullable=True)
+
     caption = Column(Text, nullable=True)
 
     posted_at = Column(DateTime, nullable=True)
@@ -110,12 +127,21 @@ class Reel(Base):
     processing_status = Column(String(50), default="pending")
     error_reason = Column(Text, nullable=True)
 
+    search_vector = Column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('english', coalesce(ai_title,'') || ' ' || coalesce(transcript,'') || ' ' || coalesce(ai_summary,'') || ' ' || coalesce(summary_detail,''))",
+            persisted=True,
+        ),
+    )
+
     job = relationship("Job", back_populates="reels", foreign_keys=[job_id])
     profile = relationship("Profile", back_populates="reels")
     user = relationship("User", back_populates="reels")
 
     __table_args__ = (
         Index("ix_reels_user_profile_shortcode", "user_id", "profile_id", "shortcode", unique=True),
+        Index("ix_reels_search_vector", "search_vector", postgresql_using="gin"),
     )
 
 
@@ -128,5 +154,3 @@ class ReelError(Base):
     stage = Column(String(50), nullable=False)
     error_text = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-
-

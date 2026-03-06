@@ -14,11 +14,7 @@ load_dotenv(BASE_DIR / ".env")
 from .config import DevConfig, ProdConfig
 from .db import init_engine, init_db
 from .services.utils import ensure_dir
-from .routes.main import bp as main_bp
-from .routes.api import bp as api_bp
-from .routes.auth import bp as auth_bp
 from .extensions import limiter
-from .services.auth import current_user
 
 
 def create_app():
@@ -30,13 +26,14 @@ def create_app():
         app.config.from_object(DevConfig)
 
     # Database
+    if not app.config["SQLALCHEMY_DATABASE_URI"]:
+        raise RuntimeError("DATABASE_URL is required and must point to your Supabase PostgreSQL instance.")
     init_engine(app.config["SQLALCHEMY_DATABASE_URI"])
     from . import models  # noqa: F401
     init_db()
 
     # Temp dir
     ensure_dir(app.config["TEMP_DIR"])
-    ensure_dir(app.config["DOWNLOADS_DIR"])
 
     # Rate limiting (disabled by default for dev)
     if app.config["RATELIMIT_ENABLED"]:
@@ -45,12 +42,16 @@ def create_app():
         limiter.init_app(app)
 
     # Blueprints
+    from .routes.main import bp as main_bp
+    from .routes.api import bp as api_bp
+    from .routes.auth import bp as auth_bp
     app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(api_bp)
 
     @app.context_processor
     def inject_auth():
+        from .services.auth import current_user
         return {"current_user": current_user()}
 
     return app

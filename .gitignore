@@ -11,4 +11,7 @@ tmp/
 instagram_cookies.txt
 ig_session
 ig_session*.*
+*.session
 downloads/
+frontend/node_modules/
+app/static/dist/

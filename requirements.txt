@@ -6,7 +6,11 @@ requests==2.31.0
 python-dotenv==1.0.1
 httpx==0.26.0
 yt-dlp==2025.1.15
+instaloader>=4.10.2
 apify-client>=1.6.0
 openai-whisper
 sumy==0.11.0
 nltk==3.8.1
+supabase==2.7.4
+cloudinary==1.41.0
+psycopg2-binary==2.9.10

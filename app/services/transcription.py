@@ -42,3 +42,8 @@ class TranscriptionService:
             raise TranscriptionError("Whisper returned invalid response")
         return (result.get("text") or "").strip()
 
+
+def transcribe_from_path(service: "TranscriptionService", audio_path: str) -> str:
+    """Transcribe from a local file path (temporary paths supported)."""
+    return service.transcribe(audio_path)
+

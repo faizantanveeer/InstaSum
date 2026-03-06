@@ -1,12 +1,13 @@
-﻿{% set thumb_url = reel.thumbnail_url or (reel.thumbnail_path and ('/thumbnails/' ~ reel.username ~ '/' ~ reel.thumbnail_path)) %}
+{% set thumb_url = reel.thumbnail_url %}
+{% set audio_url = reel.audio_url %}
+{% set show_audio = reel.audio_url is not none and reel.audio_url != '' %}
+{% set status_value = reel.processing_status or 'pending' %}
 {% set thumb_src = thumb_url %}
+{% set use_proxy_thumb = false %}
 {% if thumb_url and thumb_url.startswith('http') %}
+  {% set use_proxy_thumb = true %}
   {% set thumb_src = url_for('api.proxy_image', url=thumb_url) %}
 {% endif %}
-{% set audio_file = (reel.audio_path or ('audio/' ~ reel.shortcode ~ '.mp3')) | replace('\\', '/') %}
-{% set audio_url = url_for('api.audio', username=reel.username, filename=audio_file) %}
-{% set show_audio = reel.audio_path or (reel.processing_status == 'completed') or (reel.has_audio is defined and reel.has_audio) %}
-{% set status_value = reel.processing_status or 'pending' %}
 
 <div id="reel-card-{{ reel.id }}" class="reel-card"
      data-title="{{ reel.ai_title or '' }}"
@@ -15,7 +16,17 @@
   <div class="thumb">
     {% if thumb_url %}
     <a class="thumb-link-cover" href="{{ thumb_url }}" target="_blank" rel="noopener">
-      <img src="{{ thumb_src }}" alt="{{ reel.ai_title or 'Reel thumbnail' }}" loading="lazy" width="240" height="320" />
+      <img
+        src="{{ thumb_src }}"
+        alt="{{ reel.ai_title or 'Reel thumbnail' }}"
+        loading="lazy"
+        width="240"
+        height="320"
+        {% if use_proxy_thumb %}
+        data-fallback="{{ thumb_url }}"
+        onerror="if (this.dataset.fallback) { this.src = this.dataset.fallback; this.dataset.fallback = ''; }"
+        {% endif %}
+      />
     </a>
     {% else %}
     <div class="thumb-fallback">No thumbnail</div>

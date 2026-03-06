@@ -3,8 +3,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import mimetypes
-import os
 import queue
 import threading
 import time
@@ -12,18 +10,33 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
-from flask import Blueprint, Response, abort, current_app, redirect, render_template, request, send_file, send_from_directory, stream_with_context
+from flask import Blueprint, Response, abort, current_app, render_template, request, stream_with_context
+from sqlalchemy import case, func
+from werkzeug.security import check_password_hash, generate_password_hash
 
-from ..db import get_session, upsert_reel_fts
-from ..models import Job, Profile, Reel
-from ..services.auth import current_user, login_required
-from ..services.media import MediaError, download_reel_audio, download_reel_thumbnail
+from ..db import get_session
+from ..models import Job, Profile, Reel, User
+from ..services.auth import current_user, login_required, login_user, logout_user
+from ..services.media import MediaError, download_reel_media_tmp
+from ..services.utils import normalize_username
+from ..services.storage import upload_audio, upload_thumbnail
 from ..services.summarization import SummarizationService
 from ..services.transcription import TranscriptionError, TranscriptionService
+from .main import search_and_upsert_profile
 
 bp = Blueprint("api", __name__)
 
 _JOB_STREAMS: dict[int, dict] = {}
+
+
+@bp.errorhandler(401)
+def _api_unauthorized(_err):
+    return {"message": "Unauthorized"}, 401
+
+
+@bp.errorhandler(404)
+def _api_not_found(_err):
+    return {"message": "Not found"}, 404
 
 
 def _init_stream_state(job_id: int):
@@ -37,13 +50,6 @@ def _init_stream_state(job_id: int):
 def _emit_event(job_id: int, event: dict):
     state = _init_stream_state(job_id)
     state["queue"].put(event)
-
-
-def _guess_audio_mimetype(path: str) -> str:
-    guessed, _ = mimetypes.guess_type(path)
-    if guessed and guessed.startswith("audio/"):
-        return guessed
-    return "audio/mpeg"
 
 
 def _safe_commit(db):
@@ -83,6 +89,352 @@ def _parse_regenerate() -> bool:
     return value in ("1", "true", "yes", "on")
 
 
+def _config_page_size() -> int:
+    return max(1, int(current_app.config.get("PAGE_SIZE", 12) or 12))
+
+
+def _format_dt(value):
+    if not value:
+        return None
+    try:
+        return value.isoformat()
+    except Exception:
+        return None
+
+
+def _abbr(value):
+    if value is None:
+        return "-"
+    try:
+        num = float(value)
+    except Exception:
+        return str(value)
+    abs_num = abs(num)
+    if abs_num >= 1_000_000_000:
+        return f"{num / 1_000_000_000:.1f}B".rstrip("0").rstrip(".")
+    if abs_num >= 1_000_000:
+        return f"{num / 1_000_000:.1f}M".rstrip("0").rstrip(".")
+    if abs_num >= 1_000:
+        return f"{num / 1_000:.1f}K".rstrip("0").rstrip(".")
+    return str(int(num))
+
+
+def _reel_payload(reel: Reel):
+    return {
+        "id": reel.id,
+        "profile_id": reel.profile_id,
+        "username": reel.username,
+        "shortcode": reel.shortcode,
+        "reel_url": reel.reel_url,
+        "video_url": reel.video_url,
+        "thumbnail_url": reel.thumbnail_url,
+        "audio_url": reel.audio_url,
+        "caption": reel.caption or "",
+        "posted_at": _format_dt(reel.posted_at),
+        "like_count": reel.like_count,
+        "comment_count": reel.comment_count,
+        "view_count": reel.view_count,
+        "video_duration": reel.video_duration,
+        "transcript": reel.transcript or "",
+        "transcript_status": reel.transcript_status or "pending",
+        "ai_title": reel.ai_title or "",
+        "ai_summary": reel.ai_summary or "",
+        "summary_detail": reel.summary_detail or "",
+        "processed": bool(reel.processed),
+        "processing_status": reel.processing_status or "pending",
+        "error_reason": reel.error_reason or "",
+        "created_at": _format_dt(reel.created_at),
+        "has_audio": bool(reel.audio_url),
+    }
+
+
+@bp.get("/api/config")
+@login_required
+def api_config():
+    return {
+        "page_size": _config_page_size(),
+        "max_reels": int(current_app.config.get("MAX_REELS", 100) or 100),
+        "status_poll_seconds": int(current_app.config.get("STATUS_POLL_SECONDS", 3) or 3),
+        "list_poll_seconds": int(current_app.config.get("LIST_POLL_SECONDS", 5) or 5),
+    }
+
+
+@bp.get("/api/auth/me")
+def api_auth_me():
+    user = current_user()
+    if not user:
+        return {"message": "Unauthorized"}, 401
+    return {
+        "id": user.id,
+        "email": user.email,
+        "created_at": _format_dt(user.created_at),
+        "last_login_at": _format_dt(user.last_login_at),
+    }
+
+
+@bp.post("/api/auth/login")
+def api_auth_login():
+    if current_user():
+        user = current_user()
+        return {"message": "Already logged in.", "user": {"id": user.id, "email": user.email}}, 200
+
+    payload = request.get_json(silent=True) or {}
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+
+    if not email or not password:
+        return {"message": "Email and password are required."}, 400
+
+    db = get_session()
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if not user or not check_password_hash(user.password_hash, password):
+            return {"message": "Invalid credentials."}, 401
+        if not user.is_active:
+            return {"message": "Account is disabled."}, 403
+        user.last_login_at = datetime.utcnow()
+        db.commit()
+        login_user(user)
+        return {"message": "Logged in.", "user": {"id": user.id, "email": user.email}}, 200
+    finally:
+        db.close()
+
+
+@bp.post("/api/auth/signup")
+def api_auth_signup():
+    if current_user():
+        user = current_user()
+        return {"message": "Already logged in.", "user": {"id": user.id, "email": user.email}}, 200
+
+    payload = request.get_json(silent=True) or {}
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    confirm_password = payload.get("confirm_password") or payload.get("confirmPassword") or ""
+
+    if not email or not password:
+        return {"message": "Email and password are required."}, 400
+    if password != confirm_password:
+        return {"message": "Passwords do not match."}, 400
+    if len(password) < 8:
+        return {"message": "Password must be at least 8 characters."}, 400
+
+    db = get_session()
+    try:
+        existing = db.query(User).filter(User.email == email).first()
+        if existing:
+            return {"message": "Email is already registered."}, 409
+
+        user = User(
+            email=email,
+            password_hash=generate_password_hash(password),
+            created_at=datetime.utcnow(),
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        login_user(user)
+        return {"message": "Account created.", "user": {"id": user.id, "email": user.email}}, 201
+    finally:
+        db.close()
+
+
+@bp.post("/api/auth/logout")
+def api_auth_logout():
+    if not current_user():
+        return {"message": "Unauthorized"}, 401
+    logout_user()
+    return {"message": "Signed out."}, 200
+
+
+@bp.get("/api/profiles")
+@login_required
+def api_profiles():
+    user = current_user()
+    db = get_session()
+    try:
+        rows = (
+            db.query(
+                Profile.id,
+                Profile.username,
+                Profile.full_name,
+                Profile.profile_pic_url,
+                Profile.last_fetched_at,
+                func.count(Reel.id).label("reels_count"),
+                func.coalesce(func.sum(case((Reel.processed.is_(True), 1), else_=0)), 0).label("processed_count"),
+            )
+            .join(Reel, Reel.profile_id == Profile.id)
+            .filter(Reel.user_id == user.id)
+            .group_by(Profile.id)
+            .order_by(Profile.last_fetched_at.desc().nullslast(), Profile.id.desc())
+            .limit(10)
+            .all()
+        )
+
+        items = []
+        for row in rows:
+            items.append(
+                {
+                    "id": row.id,
+                    "username": row.username,
+                    "full_name": row.full_name or row.username,
+                    "avatar_url": row.profile_pic_url or "",
+                    "last_fetched_at": _format_dt(row.last_fetched_at),
+                    "reels_count": int(row.reels_count or 0),
+                    "processed_count": int(row.processed_count or 0),
+                }
+            )
+        return {"profiles": items}
+    finally:
+        db.close()
+
+
+@bp.post("/api/profiles/search")
+@login_required
+def api_profiles_search():
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    profile_input = payload.get("profile_input") or payload.get("query") or payload.get("username") or ""
+
+    data, status = search_and_upsert_profile(user, profile_input)
+    return data, status
+
+
+@bp.get("/api/profiles/<string:username>")
+@login_required
+def api_profile_details(username: str):
+    user = current_user()
+    normalized = normalize_username(username)
+    if not normalized:
+        return {"message": "Invalid username."}, 400
+
+    page = max(1, int(request.args.get("page", 1) or 1))
+    page_size = int(request.args.get("page_size", _config_page_size()) or _config_page_size())
+    page_size = max(1, min(page_size, 100))
+
+    db = get_session()
+    try:
+        profile = db.query(Profile).filter(Profile.username == normalized).first()
+        if not profile:
+            return {"message": "Profile not found."}, 404
+
+        base_query = (
+            db.query(Reel)
+            .filter(Reel.user_id == user.id, Reel.profile_id == profile.id)
+            .order_by(Reel.posted_at.is_(None), Reel.posted_at.desc(), Reel.id.desc())
+        )
+        total = base_query.count()
+        reels = base_query.offset((page - 1) * page_size).limit(page_size).all()
+
+        processed_count = (
+            db.query(func.count(Reel.id))
+            .filter(Reel.user_id == user.id, Reel.profile_id == profile.id, Reel.processed.is_(True))
+            .scalar()
+            or 0
+        )
+
+        return {
+            "profile": {
+                "id": profile.id,
+                "username": profile.username,
+                "full_name": profile.full_name or profile.username,
+                "biography": profile.biography or "",
+                "profile_pic_url": profile.profile_pic_url or "",
+                "followers": profile.followers,
+                "followers_abbr": _abbr(profile.followers),
+                "following": profile.following,
+                "following_abbr": _abbr(profile.following),
+                "post_count": profile.post_count,
+                "post_count_abbr": _abbr(profile.post_count),
+                "is_private_last_seen": bool(profile.is_private_last_seen),
+                "last_fetched_at": _format_dt(profile.last_fetched_at),
+                "reels_count": int(total),
+                "processed_count": int(processed_count),
+            },
+            "reels": [_reel_payload(r) for r in reels],
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": int(total),
+                "total_pages": max(1, (int(total) + page_size - 1) // page_size),
+            },
+        }
+    finally:
+        db.close()
+
+
+@bp.get("/api/reels/<int:reel_id>/status")
+@login_required
+def api_reel_status(reel_id: int):
+    user = current_user()
+    db = get_session()
+    try:
+        reel = db.query(Reel).filter(Reel.id == reel_id, Reel.user_id == user.id).first()
+        if not reel:
+            return {"message": "Reel not found."}, 404
+        return {
+            "reel": {
+                "id": reel.id,
+                "processing_status": reel.processing_status or "pending",
+                "processed": bool(reel.processed),
+                "ai_title": reel.ai_title or "",
+                "ai_summary": reel.ai_summary or "",
+                "summary_detail": reel.summary_detail or "",
+                "transcript": reel.transcript or "",
+                "error_reason": reel.error_reason or "",
+                "audio_url": reel.audio_url or "",
+                "thumbnail_url": reel.thumbnail_url or "",
+            }
+        }
+    finally:
+        db.close()
+
+
+@bp.get("/api/jobs/<int:job_id>/status")
+@login_required
+def api_job_status(job_id: int):
+    user = current_user()
+    db = get_session()
+    try:
+        job = db.query(Job).filter(Job.id == job_id, Job.user_id == user.id).first()
+        if not job:
+            return {"message": "Job not found."}, 404
+
+        reels = (
+            db.query(Reel.id, Reel.processing_status, Reel.processed)
+            .filter(Reel.user_id == user.id, Reel.job_id == job.id)
+            .all()
+        )
+        reel_statuses = [
+            {
+                "id": row.id,
+                "processing_status": row.processing_status or "pending",
+                "processed": bool(row.processed),
+            }
+            for row in reels
+        ]
+
+        return {
+            "job": {
+                "id": job.id,
+                "status": job.status or "queued",
+                "phase": job.phase or "queued",
+                "message": job.message or "",
+                "total_count": int(job.total_count or 0),
+                "processed_count": int(job.processed_count or 0),
+                "success_count": int(job.success_count or 0),
+                "failed_count": int(job.failed_count or 0),
+                "skipped_count": int(job.skipped_count or 0),
+                "requested_at": _format_dt(job.requested_at),
+                "started_at": _format_dt(job.started_at),
+                "finished_at": _format_dt(job.finished_at),
+            },
+            "reels": reel_statuses,
+        }
+    finally:
+        db.close()
+
+
 @bp.get("/proxy-image")
 @login_required
 def proxy_image():
@@ -94,16 +446,28 @@ def proxy_image():
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         abort(400)
 
+    host = parsed.netloc.lower()
+    allowed_suffixes = (
+        "cdninstagram.com",
+        "fbcdn.net",
+        "instagram.com",
+        "cloudinary.com",
+    )
+    if not any(host.endswith(sfx) for sfx in allowed_suffixes):
+        abort(400)
+
     try:
         upstream = requests.get(
             image_url,
             timeout=20,
+            allow_redirects=True,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/122.0.0.0 Safari/537.36"
                 ),
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                 "Referer": "https://www.instagram.com/",
             },
         )
@@ -134,7 +498,7 @@ def generate_reel(reel_id: int):
     try:
         reel = db.query(Reel).filter(Reel.id == reel_id, Reel.user_id == user.id).first()
         if not reel:
-            abort(404)
+            return {"message": "Reel not found."}, 404
 
         job = Job(
             profile_id=reel.profile_id,
@@ -155,7 +519,7 @@ def generate_reel(reel_id: int):
 
     state = _init_stream_state(job.id)
     _start_job_thread(current_app._get_current_object(), job.id, user.id, [reel_id], regenerate, state)
-    return {"job_id": job.id, "status": "queued", "total_targeted": 1}
+    return {"job_id": job.id, "status": "queued", "total_targeted": 1, "reel_ids": [reel_id]}
 
 
 @bp.post("/api/profiles/<int:profile_id>/generate-all")
@@ -168,7 +532,7 @@ def generate_profile_all(profile_id: int):
     try:
         profile = db.get(Profile, profile_id)
         if not profile:
-            abort(404)
+            return {"message": "Profile not found."}, 404
 
         query = db.query(Reel).filter(Reel.profile_id == profile_id, Reel.user_id == user.id)
         if not regenerate:
@@ -204,13 +568,13 @@ def generate_profile_all(profile_id: int):
                     "total": 0,
                 }
             )
-            return {"job_id": job.id, "status": "completed", "total_targeted": 0}
+            return {"job_id": job.id, "status": "completed", "total_targeted": 0, "reel_ids": []}
     finally:
         db.close()
 
     state = _init_stream_state(job.id)
     _start_job_thread(current_app._get_current_object(), job.id, user.id, reel_ids, regenerate, state)
-    return {"job_id": job.id, "status": "queued", "total_targeted": len(reel_ids)}
+    return {"job_id": job.id, "status": "queued", "total_targeted": len(reel_ids), "reel_ids": reel_ids}
 
 
 @bp.get("/api/stream/<int:job_id>")
@@ -262,152 +626,6 @@ def stream_job(job_id: int):
     )
 
 
-@bp.get("/thumbnails/<username>/<path:filename>")
-@login_required
-def thumbnails(username: str, filename: str):
-    user = current_user()
-    db = get_session()
-    try:
-        reel = (
-            db.query(Reel)
-            .filter(Reel.user_id == user.id, Reel.username == username, Reel.thumbnail_path == filename)
-            .first()
-        )
-        if not reel:
-            abort(404)
-
-        base_dir = current_app.config["DOWNLOADS_DIR"]
-        user_dir = os.path.join(base_dir, username)
-        local_path = os.path.join(user_dir, filename)
-        if os.path.exists(local_path):
-            return send_from_directory(user_dir, filename)
-
-        # Backward compatibility: if old DB rows store bare filename, also check thumbnails subfolder.
-        if "/" not in filename and "\\" not in filename:
-            alt_filename = f"thumbnails/{filename}"
-            alt_path = os.path.join(user_dir, alt_filename)
-            if os.path.exists(alt_path):
-                reel.thumbnail_path = alt_filename
-                _safe_commit(db)
-                return send_from_directory(user_dir, alt_filename)
-
-        # Attempt to recover a missing local thumbnail one time.
-        try:
-            recovered = download_reel_thumbnail(
-                reel.reel_url,
-                reel.shortcode,
-                username,
-                base_dir,
-                current_app.config["IG_COOKIES_FILE"],
-            )
-        except Exception:
-            recovered = None
-
-        if recovered:
-            recovered_path = os.path.join(user_dir, recovered)
-            reel.thumbnail_path = recovered
-            _safe_commit(db)
-            if os.path.exists(recovered_path):
-                return send_from_directory(user_dir, recovered)
-
-        # Final fallback to provider URL if available.
-        if reel.thumbnail_url:
-            return redirect(reel.thumbnail_url, code=302)
-
-        abort(404)
-    finally:
-        db.close()
-
-
-@bp.get("/audio/<username>/<path:filename>")
-@login_required
-def audio(username: str, filename: str):
-    user = current_user()
-    db = get_session()
-
-    try:
-        normalized = (filename or "").replace("\\", "/").strip("/")
-        file_name = os.path.basename(normalized)
-        stem, _ = os.path.splitext(file_name)
-
-        candidates = [normalized, file_name, f"audio/{file_name}"]
-
-        reel = (
-            db.query(Reel)
-            .filter(
-                Reel.user_id == user.id,
-                Reel.username == username,
-                Reel.audio_path.in_(candidates),
-            )
-            .first()
-        )
-
-        if not reel and stem:
-            reel = (
-                db.query(Reel)
-                .filter(
-                    Reel.user_id == user.id,
-                    Reel.username == username,
-                    Reel.shortcode == stem,
-                )
-                .first()
-            )
-            
-        if not reel:
-            current_app.logger.warning("No reel found in DB")
-            abort(404)
-
-        base_dir = current_app.config["DOWNLOADS_DIR"]
-        user_dir = os.path.join(base_dir, username)
-
-        paths_to_try = []
-
-        if reel.audio_path:
-            paths_to_try.append((reel.audio_path or "").replace("\\", "/").strip("/"))
-
-        paths_to_try.extend([
-            normalized,
-            f"audio/{file_name}",
-            file_name
-        ])
-
-        if reel.shortcode:
-            paths_to_try.extend([
-                f"audio/{reel.shortcode}.mp3",
-                f"{reel.shortcode}.mp3"
-            ])
-
-        seen = set()
-        for rel_path in paths_to_try:
-            rel_path = rel_path.replace("\\", "/").strip("/")
-            if not rel_path or rel_path in seen:
-                continue
-
-            seen.add(rel_path)
-            local_path = os.path.join(user_dir, rel_path)
-
-            if os.path.exists(local_path):
-
-                if reel.audio_path != rel_path:
-                    reel.audio_path = rel_path
-                    _safe_commit(db)
-                    
-                abs_path = os.path.abspath(local_path)
-                if not os.path.isfile(abs_path):
-                    continue
-                return send_file(
-                    abs_path,
-                    mimetype=_guess_audio_mimetype(abs_path),
-                    conditional=True,
-                    as_attachment=False,
-                    max_age=3600,
-                )
-
-        abort(404)
-
-    finally:
-        db.close()
-
 @bp.get("/export/profile/<int:profile_id>")
 @login_required
 def export_profile(profile_id: int):
@@ -450,6 +668,8 @@ def export_profile(profile_id: int):
                 "summary",
                 "summary_detail",
                 "transcript",
+                "audio_url",
+                "thumbnail_url",
                 "date",
                 "views",
                 "likes",
@@ -464,6 +684,8 @@ def export_profile(profile_id: int):
                     r.ai_summary or "",
                     r.summary_detail or "",
                     r.transcript or "",
+                    r.audio_url or "",
+                    r.thumbnail_url or "",
                     r.posted_at.isoformat() if r.posted_at else "",
                     r.view_count or "",
                     r.like_count or "",
@@ -482,7 +704,7 @@ def export_profile(profile_id: int):
         db.close()
 
 
-def _start_job_thread(app, job_id: int, user_id: int, reel_ids: list[int], regenerate: bool, state: dict):
+def _start_job_thread(app, job_id: int, user_id: str, reel_ids: list[int], regenerate: bool, state: dict):
     with state["lock"]:
         t = state.get("thread")
         if t and t.is_alive():
@@ -496,7 +718,7 @@ def _start_job_thread(app, job_id: int, user_id: int, reel_ids: list[int], regen
         t.start()
 
 
-def _process_job(app, job_id: int, user_id: int, reel_ids: list[int], regenerate: bool):
+def _process_job(app, job_id: int, user_id: str, reel_ids: list[int], regenerate: bool):
     with app.app_context():
         db = get_session()
         try:
@@ -578,97 +800,74 @@ def _process_job(app, job_id: int, user_id: int, reel_ids: list[int], regenerate
                                 },
                             )
 
-                            audio_full_path = ""
-                            if reel.audio_path:
-                                candidate = os.path.join(app.config["DOWNLOADS_DIR"], username, reel.audio_path)
-                                if os.path.exists(candidate):
-                                    audio_full_path = candidate
-                                elif "/" not in reel.audio_path and "\\" not in reel.audio_path:
-                                    alt_rel = f"audio/{reel.audio_path}"
-                                    alt_candidate = os.path.join(app.config["DOWNLOADS_DIR"], username, alt_rel)
-                                    if os.path.exists(alt_candidate):
-                                        reel.audio_path = alt_rel
-                                        _safe_commit(db)
-                                        audio_full_path = alt_candidate
+                            with download_reel_media_tmp(
+                                reel_url=reel.reel_url,
+                                shortcode=reel.shortcode,
+                                cookies_file=app.config["IG_COOKIES_FILE"],
+                                cookies_from_browser=app.config["IG_COOKIES_FROM_BROWSER"],
+                                browser_name=app.config["IG_BROWSER"],
+                                browser_profile=app.config["IG_BROWSER_PROFILE"],
+                                ffmpeg_location=app.config["FFMPEG_LOCATION"],
+                            ) as media:
+                                audio_tmp_path = media.get("audio_path")
+                                thumb_tmp_path = media.get("thumbnail_path")
 
-                            if not audio_full_path:
-                                media = download_reel_audio(
-                                    reel.reel_url,
-                                    reel.shortcode,
-                                    username,
-                                    app.config["DOWNLOADS_DIR"],
-                                    app.config["IG_COOKIES_FILE"],
-                                    app.config["FFMPEG_LOCATION"],
+                                if not audio_tmp_path:
+                                    raise MediaError("Audio file is missing after download")
+                                if not audio_tmp_path or not isinstance(audio_tmp_path, str):
+                                    raise MediaError("Invalid audio path")
+
+                                _emit_event(
+                                    job_id,
+                                    {
+                                        "type": "progress",
+                                        "message": f"Transcribing reel {index}/{len(reel_ids)}",
+                                        "processed": job.processed_count,
+                                        "total": job.total_count,
+                                        "percent": int((job.processed_count / max(job.total_count, 1)) * 100),
+                                    },
                                 )
-                                reel.audio_path = media.get("audio_file")
-                                if media.get("thumbnail_file"):
-                                    reel.thumbnail_path = media.get("thumbnail_file")
-                                _safe_commit(db)
-                                if reel.audio_path:
-                                    audio_full_path = os.path.join(app.config["DOWNLOADS_DIR"], username, reel.audio_path)
 
-                            if not audio_full_path or not os.path.exists(audio_full_path):
-                                raise MediaError("Audio file is missing after download")
-                            if os.path.getsize(audio_full_path) < 1024:
-                                raise MediaError("Downloaded audio appears empty or invalid")
+                                raw_transcript = tx.transcribe(audio_tmp_path)
+                                if raw_transcript.strip():
+                                    reel.transcript = raw_transcript
+                                    reel.transcript_status = "ok"
+                                else:
+                                    reel.transcript = "No spoken content detected."
+                                    reel.transcript_status = "no_speech"
 
-                            _emit_event(
-                                job_id,
-                                {
-                                    "type": "progress",
-                                    "message": f"Transcribing reel {index}/{len(reel_ids)}",
-                                    "processed": job.processed_count,
-                                    "total": job.total_count,
-                                    "percent": int((job.processed_count / max(job.total_count, 1)) * 100),
-                                },
-                            )
+                                _emit_event(
+                                    job_id,
+                                    {
+                                        "type": "progress",
+                                        "message": f"Generating summary for reel {index}/{len(reel_ids)}",
+                                        "processed": job.processed_count,
+                                        "total": job.total_count,
+                                        "percent": int((job.processed_count / max(job.total_count, 1)) * 100),
+                                    },
+                                )
 
-                            raw_transcript = tx.transcribe(audio_full_path)
-                            if raw_transcript.strip():
-                                reel.transcript = raw_transcript
-                                reel.transcript_status = "ok"
-                            else:
-                                reel.transcript = "No spoken content detected."
-                                reel.transcript_status = "no_speech"
+                                title, detailed_summary = sm.summarize(raw_transcript or "", reel.caption or "")
+                                reel.ai_title = title or "Untitled Reel"
+                                reel.summary_detail = detailed_summary or ""
+                                reel.ai_summary = _summary_preview(reel.summary_detail)
 
-                            _emit_event(
-                                job_id,
-                                {
-                                    "type": "progress",
-                                    "message": f"Generating summary for reel {index}/{len(reel_ids)}",
-                                    "processed": job.processed_count,
-                                    "total": job.total_count,
-                                    "percent": int((job.processed_count / max(job.total_count, 1)) * 100),
-                                },
-                            )
+                                audio_upload = upload_audio(audio_tmp_path, reel.shortcode, username)
+                                thumb_upload = upload_thumbnail(thumb_tmp_path, reel.shortcode, username)
 
-                            title, detailed_summary = sm.summarize(raw_transcript or "", reel.caption or "")
-                            reel.ai_title = title or "Untitled Reel"
-                            reel.summary_detail = detailed_summary or ""
-                            reel.ai_summary = _summary_preview(reel.summary_detail)
+                            if not audio_upload.get("url"):
+                                raise MediaError("Failed to upload reel audio to Cloudinary")
+
+                            reel.audio_url = audio_upload.get("url")
+                            reel.audio_cloudinary_id = audio_upload.get("public_id")
+                            if thumb_upload.get("url"):
+                                reel.thumbnail_url = thumb_upload.get("url")
+                                reel.thumbnail_cloudinary_id = thumb_upload.get("public_id")
+
                             reel.processing_status = "completed"
                             reel.processed = True
                             reel.error_reason = None
                             _safe_commit(db)
-
-                            # FTS is useful but non-critical. A failure here should not fail the reel.
-                            try:
-                                upsert_reel_fts(
-                                    db,
-                                    reel.id,
-                                    reel.ai_title,
-                                    reel.ai_summary,
-                                    reel.transcript,
-                                    reel.summary_detail,
-                                )
-                                _safe_commit(db)
-                            except Exception as exc:
-                                db.rollback()
-                                current_app.logger.warning(
-                                    "FTS update failed for reel_id=%s: %s",
-                                    reel.id,
-                                    _error_text(exc, "FTS update failed"),
-                                )
 
                             outcome = "success"
                             status_message = "Processed"
@@ -801,6 +1000,8 @@ def _reel_to_dict(r: Reel):
         "summary": r.ai_summary,
         "summary_detail": r.summary_detail,
         "transcript": r.transcript,
+        "audio_url": r.audio_url,
+        "thumbnail_url": r.thumbnail_url,
         "date": r.posted_at.isoformat() if r.posted_at else None,
         "views": r.view_count,
         "likes": r.like_count,
